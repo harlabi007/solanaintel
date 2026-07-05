@@ -20,7 +20,7 @@ router.get('/', async (req, res) => {
       try {
         const { data } = await axios.get(
           `https://api.helius.xyz/v0/addresses/${address}/transactions`,
-          { params: { 'api-key': process.env.HELIUS_API_KEY, limit: 10, type: 'SWAP' } }
+          { params: { 'api-key': process.env.HELIUS_API_KEY, limit: 15 } }
         );
 
         if (!Array.isArray(data)) continue;
