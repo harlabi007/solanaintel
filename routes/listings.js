@@ -32,47 +32,64 @@ router.get('/', async (req, res) => {
     const cached = cache.get(CACHE_KEY);
     if (cached) return res.json(cached);
 
+    const now = Date.now();
+
+    // Get latest boosted tokens on Solana from DexScreener
     const { data } = await axios.get(
-      'https://api.dexscreener.com/latest/dex/pairs/solana',
+      'https://api.dexscreener.com/token-boosts/latest/v1',
       { headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 10000 }
     );
 
-    const pairs = data?.pairs || [];
-    const now = Date.now();
+    const solana = (Array.isArray(data) ? data : [])
+      .filter(p => p.chainId === 'solana' && p.tokenAddress)
+      .slice(0, 20);
 
-    const recent = pairs.filter(p => {
-      const ageHours = (now - (p.pairCreatedAt || 0)) / 3600000;
-      return ageHours < 48 && p.baseToken?.address;
-    });
+    const results = await Promise.allSettled(
+      solana.map(async item => {
+        try {
+          const r = await axios.get(
+            `https://api.dexscreener.com/latest/dex/tokens/${item.tokenAddress}`,
+            { timeout: 5000 }
+          );
+          const pair = r.data?.pairs?.[0];
+          if (!pair) return null;
 
-    const result = recent.slice(0, 30).map(pair => {
-      const price  = parseFloat(pair.priceUsd || 0);
-      const mc     = parseFloat(pair.marketCap || pair.fdv || 0);
-      const liq    = parseFloat(pair.liquidity?.usd || 0);
-      const vol24h = parseFloat(pair.volume?.h24 || 0);
-      const ch     = parseFloat(pair.priceChange?.h24 || 0);
-      const mint   = pair.baseToken?.address || '';
-      const sym    = pair.baseToken?.symbol || '???';
-      const altScore = calcALT(liq, mc, vol24h);
-      const grade  = altGrade(altScore);
+          const price  = parseFloat(pair.priceUsd || 0);
+          const mc     = parseFloat(pair.marketCap || pair.fdv || 0);
+          const liq    = parseFloat(pair.liquidity?.usd || 0);
+          const vol24h = parseFloat(pair.volume?.h24 || 0);
+          const ch     = parseFloat(pair.priceChange?.h24 || 0);
+          const altScore = calcALT(liq, mc, vol24h);
 
-      return {
-        mint, symbol: sym, name: pair.baseToken?.name || sym,
-        price, priceChange24h: ch, marketCap: mc, liquidity: liq,
-        volume24h, holders: 0, holderGrowthRate: 0,
-        mintRevoked: false, freezeRevoked: false,
-        insiderCount: 0, smartMoneyBuys: 0,
-        listedAt: pair.pairCreatedAt || now,
-        dex: pair.dexId || 'raydium',
-        altScore, altGrade: grade,
-        solscanUrl: `https://solscan.io/token/${mint}`,
-        dexscreenerUrl: `https://dexscreener.com/solana/${mint}`
-      };
-    }).sort((a, b) => b.listedAt - a.listedAt);
+          return {
+            mint: item.tokenAddress,
+            symbol: pair.baseToken?.symbol || '???',
+            name: pair.baseToken?.name || '???',
+            price, priceChange24h: ch, marketCap: mc,
+            liquidity: liq, volume24h, holders: 0, holderGrowthRate: 0,
+            mintRevoked: false, freezeRevoked: false,
+            insiderCount: 0, smartMoneyBuys: 0,
+            listedAt: pair.pairCreatedAt || now,
+            dex: pair.dexId || 'raydium',
+            altScore, altGrade: altGrade(altScore),
+            solscanUrl: `https://solscan.io/token/${item.tokenAddress}`,
+            dexscreenerUrl: `https://dexscreener.com/solana/${item.tokenAddress}`
+          };
+        } catch {
+          return null;
+        }
+      })
+    );
 
-    console.log(`New listings: ${result.length} tokens`);
-    cache.set(CACHE_KEY, result, CACHE_TTL);
-    res.json(result);
+    const final = results
+      .filter(r => r.status === 'fulfilled' && r.value)
+      .map(r => r.value)
+      .sort((a, b) => b.listedAt - a.listedAt);
+
+    console.log(`New listings: ${final.length} tokens`);
+    cache.set(CACHE_KEY, final, CACHE_TTL);
+    res.json(final);
+
   } catch (err) {
     console.error('New listings error:', err.message);
     res.status(500).json({ error: err.message });
