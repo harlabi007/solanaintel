@@ -34,30 +34,28 @@ router.get('/', async (req, res) => {
 
     const now = Date.now();
 
-    // Use Birdeye token list sorted by creation time
     const { data } = await axios.get(
-      'https://public-api.birdeye.so/defi/tokenlist',
+      'https://public-api.birdeye.so/defi/v2/tokens/new_listing',
       {
         headers: {
           'X-API-KEY': process.env.BIRDEYE_API_KEY,
           'x-chain': 'solana'
         },
         params: {
-          sort_by: 'created_at',
-          sort_type: 'desc',
-          offset: 0,
-          limit: 30,
-          min_liquidity: 1000
+          limit: 20,
+          meme_platform_enabled: true
         },
         timeout: 15000
       }
     );
 
-    const items = data?.data?.tokens || data?.data?.items || [];
+    const items = data?.data?.items || [];
+    console.log(`Birdeye returned ${items.length} new listings`);
+
     const result = items.map(item => {
-      const liq = item.liquidity || item.v24hUSD || 0;
-      const mc = item.mc || item.marketcap || item.realMc || 0;
-      const vol = item.v24hUSD || item.volume24h || 0;
+      const liq = item.liquidity || 0;
+      const mc = item.marketcap || item.mc || item.realMc || 0;
+      const vol = item.v24hUSD || item.volume24hUSD || 0;
       const altScore = calcALT(liq, mc, vol);
 
       return {
@@ -65,17 +63,17 @@ router.get('/', async (req, res) => {
         symbol: item.symbol || '???',
         name: item.name || item.symbol || '???',
         price: item.price || 0,
-        priceChange24h: item.priceChange24hPercent || item.v24hChangePercent || 0,
+        priceChange24h: item.priceChange24hPercent || 0,
         marketCap: mc,
         liquidity: liq,
         volume24h: vol,
-        holders: item.holder || item.numberMarkets || 0,
+        holders: item.holder || 0,
         holderGrowthRate: item.uniqueWallet24h || 0,
         mintRevoked: false,
         freezeRevoked: false,
         insiderCount: 0,
         smartMoneyBuys: 0,
-        listedAt: item.createdAt ? new Date(item.createdAt).getTime() : now,
+        listedAt: item.listTime ? item.listTime * 1000 : now,
         dex: 'Raydium',
         altScore,
         altGrade: altGrade(altScore),
@@ -84,12 +82,11 @@ router.get('/', async (req, res) => {
       };
     }).filter(t => t.mint).sort((a, b) => b.listedAt - a.listedAt);
 
-    console.log(`New listings: ${result.length} tokens`);
     cache.set(CACHE_KEY, result, CACHE_TTL);
     res.json(result);
 
   } catch (err) {
-    console.error('New listings error:', err.response?.status, err.message);
+    console.error('New listings error:', err.response?.status, err.response?.data || err.message);
     res.status(500).json({ error: err.message });
   }
 });
