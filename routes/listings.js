@@ -1,7 +1,7 @@
 const express = require('express');
-const router  = require('express').Router();
-const cache   = require('../lib/cache');
-const axios   = require('axios');
+const router = express.Router();
+const cache = require('../lib/cache');
+const axios = require('axios');
 
 const CACHE_KEY = 'new_listings';
 const CACHE_TTL = 60;
@@ -27,45 +27,49 @@ function calcALT(liq, mc, vol) {
   return Math.min(100, s);
 }
 
-const express2 = require('express');
-const router2 = express2.Router();
-
-router2.get('/', async (req, res) => {
+router.get('/', async (req, res) => {
   try {
     const cached = cache.get(CACHE_KEY);
     if (cached) return res.json(cached);
 
+    const now = Date.now();
+
+    // Use Birdeye token list sorted by creation time
     const { data } = await axios.get(
-      'https://public-api.birdeye.so/defi/v2/tokens/new_listing',
+      'https://public-api.birdeye.so/defi/tokenlist',
       {
         headers: {
           'X-API-KEY': process.env.BIRDEYE_API_KEY,
           'x-chain': 'solana'
         },
-        params: { limit: 30 },
+        params: {
+          sort_by: 'created_at',
+          sort_type: 'desc',
+          offset: 0,
+          limit: 30,
+          min_liquidity: 1000
+        },
         timeout: 15000
       }
     );
 
-    const items = data?.data?.items || [];
-    const now = Date.now();
-
+    const items = data?.data?.tokens || data?.data?.items || [];
     const result = items.map(item => {
-      const liq    = item.liquidity || 0;
-      const mc     = item.marketcap || item.mc || 0;
-      const vol24h = item.v24hUSD || 0;
-      const altScore = calcALT(liq, mc, vol24h);
+      const liq = item.liquidity || item.v24hUSD || 0;
+      const mc = item.mc || item.marketcap || item.realMc || 0;
+      const vol = item.v24hUSD || item.volume24h || 0;
+      const altScore = calcALT(liq, mc, vol);
 
       return {
         mint: item.address,
         symbol: item.symbol || '???',
         name: item.name || item.symbol || '???',
         price: item.price || 0,
-        priceChange24h: item.priceChange24hPercent || 0,
+        priceChange24h: item.priceChange24hPercent || item.v24hChangePercent || 0,
         marketCap: mc,
         liquidity: liq,
-        volume24h: vol24h,
-        holders: item.holder || 0,
+        volume24h: vol,
+        holders: item.holder || item.numberMarkets || 0,
         holderGrowthRate: item.uniqueWallet24h || 0,
         mintRevoked: false,
         freezeRevoked: false,
@@ -78,21 +82,21 @@ router2.get('/', async (req, res) => {
         solscanUrl: `https://solscan.io/token/${item.address}`,
         dexscreenerUrl: `https://dexscreener.com/solana/${item.address}`
       };
-    }).sort((a, b) => b.listedAt - a.listedAt);
+    }).filter(t => t.mint).sort((a, b) => b.listedAt - a.listedAt);
 
-    console.log(`New listings: ${result.length} tokens from Birdeye`);
+    console.log(`New listings: ${result.length} tokens`);
     cache.set(CACHE_KEY, result, CACHE_TTL);
     res.json(result);
 
   } catch (err) {
-    console.error('New listings error:', err.message);
+    console.error('New listings error:', err.response?.status, err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
-router2.get('/alt-picks', async (req, res) => {
+router.get('/alt-picks', async (req, res) => {
   const cached = cache.get(CACHE_KEY) || [];
   res.json(cached.filter(t => t.altScore >= 50).sort((a, b) => b.altScore - a.altScore));
 });
 
-module.exports = router2;
+module.exports = router;
