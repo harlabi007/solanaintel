@@ -1,5 +1,5 @@
 const express = require('express');
-const router  = express.Router();
+const router  = require('express').Router();
 const cache   = require('../lib/cache');
 const axios   = require('axios');
 
@@ -27,68 +27,62 @@ function calcALT(liq, mc, vol) {
   return Math.min(100, s);
 }
 
-router.get('/', async (req, res) => {
+const express2 = require('express');
+const router2 = express2.Router();
+
+router2.get('/', async (req, res) => {
   try {
     const cached = cache.get(CACHE_KEY);
     if (cached) return res.json(cached);
 
+    const { data } = await axios.get(
+      'https://public-api.birdeye.so/defi/v2/tokens/new_listing',
+      {
+        headers: {
+          'X-API-KEY': process.env.BIRDEYE_API_KEY,
+          'x-chain': 'solana'
+        },
+        params: { limit: 30 },
+        timeout: 15000
+      }
+    );
+
+    const items = data?.data?.items || [];
     const now = Date.now();
 
-    // Get latest boosted tokens on Solana from DexScreener
-    const { data } = await axios.get(
-      'https://api.dexscreener.com/token-boosts/latest/v1',
-      { headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 10000 }
-    );
+    const result = items.map(item => {
+      const liq    = item.liquidity || 0;
+      const mc     = item.marketcap || item.mc || 0;
+      const vol24h = item.v24hUSD || 0;
+      const altScore = calcALT(liq, mc, vol24h);
 
-    const solana = (Array.isArray(data) ? data : [])
-      .filter(p => p.chainId === 'solana' && p.tokenAddress)
-      .slice(0, 20);
+      return {
+        mint: item.address,
+        symbol: item.symbol || '???',
+        name: item.name || item.symbol || '???',
+        price: item.price || 0,
+        priceChange24h: item.priceChange24hPercent || 0,
+        marketCap: mc,
+        liquidity: liq,
+        volume24h: vol24h,
+        holders: item.holder || 0,
+        holderGrowthRate: item.uniqueWallet24h || 0,
+        mintRevoked: false,
+        freezeRevoked: false,
+        insiderCount: 0,
+        smartMoneyBuys: 0,
+        listedAt: item.createdAt ? new Date(item.createdAt).getTime() : now,
+        dex: 'Raydium',
+        altScore,
+        altGrade: altGrade(altScore),
+        solscanUrl: `https://solscan.io/token/${item.address}`,
+        dexscreenerUrl: `https://dexscreener.com/solana/${item.address}`
+      };
+    }).sort((a, b) => b.listedAt - a.listedAt);
 
-    const results = await Promise.allSettled(
-      solana.map(async item => {
-        try {
-          const r = await axios.get(
-            `https://api.dexscreener.com/latest/dex/tokens/${item.tokenAddress}`,
-            { timeout: 5000 }
-          );
-          const pair = r.data?.pairs?.[0];
-          if (!pair) return null;
-
-          const price  = parseFloat(pair.priceUsd || 0);
-          const mc     = parseFloat(pair.marketCap || pair.fdv || 0);
-          const liq    = parseFloat(pair.liquidity?.usd || 0);
-          const vol24h = parseFloat(pair.volume?.h24 || 0);
-          const ch     = parseFloat(pair.priceChange?.h24 || 0);
-          const altScore = calcALT(liq, mc, vol24h);
-
-          return {
-            mint: item.tokenAddress,
-            symbol: pair.baseToken?.symbol || '???',
-            name: pair.baseToken?.name || '???',
-            price, priceChange24h: ch, marketCap: mc,
-            liquidity: liq, volume24h, holders: 0, holderGrowthRate: 0,
-            mintRevoked: false, freezeRevoked: false,
-            insiderCount: 0, smartMoneyBuys: 0,
-            listedAt: pair.pairCreatedAt || now,
-            dex: pair.dexId || 'raydium',
-            altScore, altGrade: altGrade(altScore),
-            solscanUrl: `https://solscan.io/token/${item.tokenAddress}`,
-            dexscreenerUrl: `https://dexscreener.com/solana/${item.tokenAddress}`
-          };
-        } catch {
-          return null;
-        }
-      })
-    );
-
-    const final = results
-      .filter(r => r.status === 'fulfilled' && r.value)
-      .map(r => r.value)
-      .sort((a, b) => b.listedAt - a.listedAt);
-
-    console.log(`New listings: ${final.length} tokens`);
-    cache.set(CACHE_KEY, final, CACHE_TTL);
-    res.json(final);
+    console.log(`New listings: ${result.length} tokens from Birdeye`);
+    cache.set(CACHE_KEY, result, CACHE_TTL);
+    res.json(result);
 
   } catch (err) {
     console.error('New listings error:', err.message);
@@ -96,9 +90,9 @@ router.get('/', async (req, res) => {
   }
 });
 
-router.get('/alt-picks', async (req, res) => {
+router2.get('/alt-picks', async (req, res) => {
   const cached = cache.get(CACHE_KEY) || [];
   res.json(cached.filter(t => t.altScore >= 50).sort((a, b) => b.altScore - a.altScore));
 });
 
-module.exports = router;
+module.exports = router2;
