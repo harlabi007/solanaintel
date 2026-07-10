@@ -1,67 +1,64 @@
 const express = require('express');
 const router  = express.Router();
 const cache   = require('../lib/cache');
-const helius  = require('../lib/helius');
-const { ALL_ADDRESSES, WHALE_ADDRESSES, getWalletInfo } = require('../lib/wallets');
+const axios   = require('axios');
+const { ALL_ADDRESSES, getWalletInfo } = require('../lib/wallets');
 
-const CACHE_KEY = 'whale_alerts';
-const CACHE_TTL = 15;
-
-// ─── GET /api/whale-alerts ────────────────────────────────────────────────────
 router.get('/', async (req, res) => {
   try {
-    const cached = cache.get(CACHE_KEY);
+    const cached = cache.get('whale_alerts');
     if (cached) return res.json(cached);
 
-    const THRESHOLD = parseFloat(process.env.WHALE_THRESHOLD_USD) || 50000;
+    const results = [];
+    for (const address of ALL_ADDRESSES.slice(0, 8)) {
+      try {
+        const { data } = await axios.get(
+          `https://api.helius.xyz/v0/addresses/${address}/transactions`,
+          { params: { 'api-key': process.env.HELIUS_API_KEY, limit: 10 }, timeout: 8000 }
+        );
+        if (!Array.isArray(data)) continue;
+        const walletInfo = getWalletInfo(address);
+        for (const tx of data) {
+          const nativeAmt = (tx.nativeTransfers||[]).reduce((s,t)=>s+(t.amount||0),0)/1e9;
+          const amountUSD = nativeAmt * (global.solPrice || 78);
+          if (amountUSD < 50) continue;
+          const tokenTransfers = tx.tokenTransfers || [];
+          const token = tokenTransfers.find(t => t.mint !== 'So11111111111111111111111111111111111111112' && t.mint);
+          results.push({
+            wallet: address,
+            walletLabel: walletInfo?.label || 'Unknown',
+            walletTag: walletInfo?.tag || 'whale',
+            tokenMint: token?.mint || '',
+            tokenSymbol: token?.symbol || 'SOL',
+            amountUSD,
+            type: token ? (token.toUserAccount === address ? 'buy' : 'sell') : 'transfer',
+            timestamp: (tx.timestamp||0)*1000,
+            signature: tx.signature,
+            dex: tx.source || 'Unknown',
+            solscanUrl: `https://solscan.io/tx/${tx.signature}`,
+            solscanWallet: `https://solscan.io/account/${address}`
+          });
+        }
+      } catch(err) { console.error(`Whale ${address.slice(0,8)}: ${err.message}`); }
+    }
 
-    // Fetch from all tracked wallets — whale alerts are any large transaction
-    const rawTxs = await helius.getTransactionsByAddresses(ALL_ADDRESSES, 30);
-
-    const alerts = rawTxs
-      .map(tx => {
-        const walletInfo = getWalletInfo(tx._wallet);
-        return helius.parseSwap(tx, tx._wallet, walletInfo?.label);
-      })
-      .filter(tx => tx && tx.amountUSD >= THRESHOLD);
-
-    // Deduplicate
+    results.sort((a,b) => b.amountUSD - a.amountUSD);
     const seen = new Set();
-    const unique = alerts.filter(tx => {
-      if (seen.has(tx.signature)) return false;
-      seen.add(tx.signature);
-      return true;
-    });
-
-    // Enrich with wallet metadata
-    const result = unique.map(tx => {
-      const walletInfo = getWalletInfo(tx.wallet);
-      return {
-        ...tx,
-        walletLabel: walletInfo?.label || 'Unknown Whale',
-        walletTag: walletInfo?.tag || 'whale',
-        isWhale: WHALE_ADDRESSES.includes(tx.wallet),
-        solscanWallet: `https://solscan.io/account/${tx.wallet}`,
-        dexscreenerUrl: `https://dexscreener.com/solana/${tx.tokenMint}`
-      };
-    });
-
-    result.sort((a, b) => b.amountUSD - a.amountUSD);
+    const unique = results.filter(t => { if(seen.has(t.signature)) return false; seen.add(t.signature); return true; });
 
     const summary = {
-      totalEvents: result.length,
-      totalVolumeUSD: result.reduce((s, t) => s + t.amountUSD, 0),
-      biggestTradeUSD: result[0]?.amountUSD || 0,
-      buyCount: result.filter(t => t.type === 'buy').length,
-      sellCount: result.filter(t => t.type === 'sell').length,
-      trades: result
+      totalEvents: unique.length,
+      totalVolumeUSD: unique.reduce((s,t)=>s+t.amountUSD,0),
+      biggestTradeUSD: unique[0]?.amountUSD || 0,
+      buyCount: unique.filter(t=>t.type==='buy').length,
+      sellCount: unique.filter(t=>t.type==='sell').length,
+      trades: unique
     };
 
-    cache.set(CACHE_KEY, summary, CACHE_TTL);
+    cache.set('whale_alerts', summary, 20);
     res.json(summary);
-
-  } catch (err) {
-    console.error('Whale alerts error:', err.message);
+  } catch(err) {
+    console.error('Whale error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
